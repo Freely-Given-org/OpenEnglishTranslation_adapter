@@ -31,7 +31,7 @@ from tkinter import ttk, messagebox, filedialog
 
 
 PROGRAM_NAME = 'OET Adapter'
-PROGRAM_VERSION = '0.2.0'
+PROGRAM_VERSION = '0.4.0'
 
 APP_FOLDER = Path(__file__).resolve().parent
 GLOBAL_SETTINGS_PATH = APP_FOLDER / 'globalSettings.toml'
@@ -175,6 +175,7 @@ def read_toml(path):
 # ---------------------------------------------------------------------------
 
 ALL_SECTIONS = ['FRT', 'OT', 'DC', 'NT', 'BAK']
+ALL_PARTS = ['intros', 'headings', 'footnotes', 'xrefs']
 ALL_FORMATS = ['ESFM', 'USFM', 'VPL']
 
 
@@ -182,14 +183,21 @@ def rv_included(answers):
     return answers.get('version', 'RV') in ('RV', 'BOTH')
 
 
+def esfm_exported(answers):
+    return answers.get('word_numbers', 'remove') == 'keep' or 'ESFM' in answers.get('formats', ['USFM'])
+
+
 class Question:
-    def __init__(self, key, label, prompt, kind, options, default, applies=lambda answers: True):
+    def __init__(self, key, label, prompt, kind, options, default, applies=lambda answers: True, allow_none=False):
         self.key, self.label, self.prompt, self.kind = key, label, prompt, kind
         self.options, self.default, self.applies = options, default, applies # options are (value, text) pairs
+        self.allow_none = allow_none # For 'check' questions: can nothing be selected?
 
     def answer_text(self, value):
         texts = dict(self.options)
         if self.kind == 'check':
+            if not value:
+                return 'None'
             return 'ALL' if set(value) == {v for v, _t in self.options} \
                 else ', '.join(texts.get(v, v) for v in value)
         return texts.get(value, str(value))
@@ -206,6 +214,13 @@ QUESTIONS = [
     Question('book_order', 'Book order', 'Which book order do you want?', 'radio',
              [('OET-RV', 'OET-RV book order'), ('traditional', 'Traditional book order')],
              'OET-RV', applies=rv_included),
+    Question('parts', 'Included parts', 'Which of these parts do you want included?', 'check',
+             [('intros', 'Book introductions'), ('headings', 'Section headings'), ('footnotes', 'Footnotes'),
+              ('xrefs', 'Cross-references')],
+             list(ALL_PARTS), allow_none=True),
+    Question('spelling', 'Spelling', 'Which spelling do you want?', 'radio',
+             [('UK', 'Remain in British spelling'), ('US', 'Change to American spelling and terminology')],
+             'UK'),
     Question('divine_name', 'Divine name', 'How should the divine name be shown in the OET-RV?', 'radio',
              [('Yahweh', 'Leave ‘Yahweh’'), ('LORD', 'Change to ‘the LORD’ (with ‘ORD’ in small caps)')],
              'Yahweh', applies=rv_included),
@@ -219,6 +234,10 @@ QUESTIONS = [
     Question('formats', 'File types', 'Which file types do you want to export?', 'check',
              [('ESFM', 'ESFM files'), ('USFM', 'USFM files'), ('VPL', 'VPL (verse-per-line) files')],
              ['USFM'], applies=lambda answers: answers.get('word_numbers') == 'remove'),
+    Question('esfm_markers', 'ESFM markers', 'Which formatting markers should the ESFM files keep?', 'radio',
+             [('all', 'Leave the additional formatting markers'),
+              ('essential', 'Just keep the essential ones (simplified like the USFM files)')],
+             'all', applies=esfm_exported),
 ]
 QUESTIONS_BY_KEY = {q.key: q for q in QUESTIONS}
 
@@ -233,12 +252,18 @@ def effective_answers(answers):
     if result['word_numbers'] == 'keep':
         result['formats'] = ['ESFM']
     result['sections'] = [s for s in ALL_SECTIONS if s in result['sections']]
+    result['parts'] = [p for p in ALL_PARTS if p in result['parts']]
     result['formats'] = [f for f in ALL_FORMATS if f in result['formats']]
+    if 'ESFM' not in result['formats']:
+        result['esfm_markers'] = 'all'
     return result
 
 
+PART_ABBREVIATIONS = {'intros': 'Intros', 'headings': 'Hdgs', 'footnotes': 'FNs', 'xrefs': 'XRefs'}
+
+
 def settings_name(answers):
-    """ Makes a name like RVLV_ALLBks_RVOrder_LORD_TradNames_NoWordNums_ALLFormats """
+    """ Makes a name like RVLV_ALLBks_RVOrder_NoFNs_UK_LORD_TradNames_NoWordNums_ALLFormats_Simple """
     a = effective_answers(answers)
     parts = [{'RV': 'RV', 'LV': 'LV', 'BOTH': 'RVLV'}[a['version']]]
     if a['sections'] == ALL_SECTIONS:
@@ -247,10 +272,16 @@ def settings_name(answers):
         parts.append(''.join({'FRT': 'Front', 'BAK': 'Back'}.get(s, s) for s in a['sections']) + 'Bks')
     if rv_included(a):
         parts.append('RVOrder' if a['book_order'] == 'OET-RV' else 'TradOrder')
+    excluded = [p for p in ALL_PARTS if p not in a['parts']]
+    parts.append('No' + ''.join(PART_ABBREVIATIONS[p] for p in excluded) if excluded else 'ALLParts')
+    parts.append(a['spelling'])
+    if rv_included(a):
         parts.append(a['divine_name'])
         parts.append('RVNames' if a['names'] == 'RV' else 'TradNames')
     parts.append('WordNums' if a['word_numbers'] == 'keep' else 'NoWordNums')
     parts.append('ALLFormats' if a['formats'] == ALL_FORMATS else ''.join(a['formats']))
+    if 'ESFM' in a['formats']:
+        parts.append('Simple' if a['esfm_markers'] == 'essential' else 'AllMarkers')
     return '_'.join(parts)
 
 
@@ -361,6 +392,197 @@ def remove_word_numbers(text):
     """ Remove ESFM word numbers and the \\rem WORDTABLE line. """
     text = re.sub(r'^\\rem WORDTABLE .*\n', '', text, flags=re.MULTILINE)
     return WORD_NUMBER_REGEX.sub('', text)
+
+
+# --- Optional parts: book introductions, section headings, footnotes, cross-references ---
+
+INTRO_LINE_REGEX = re.compile(r'\\i(?!de?\b)[a-z]*[0-9]*\b') # \ip, \is1, \io1, \iot, \ie, etc. (but not \id or \ide)
+HEADING_LINE_REGEX = re.compile(r'\\(s[0-9]?|ms[0-9]?|mr|sr|r)\b|\\rem /(s[0-9]?|ms[0-9]?|r)\b')
+FOOTNOTE_REGEX = re.compile(r'\\(f|fe|ef) .*?\\\1\*')
+XREF_REGEX = re.compile(r'\\(x|ex) .*?\\\1\*')
+
+
+def remove_parts(text, BBB, includedParts):
+    """
+    Remove book introductions (not in front/back matter books), section headings
+        (including parallel passage references and the OET-RV's extra `\\rem /s1` headings),
+        footnotes and/or cross-references, unless they're in includedParts.
+    """
+    removeIntros = 'intros' not in includedParts and BBB not in FRONT_BOOKS and BBB not in BACK_BOOKS
+    removeHeadings = 'headings' not in includedParts
+    newLines = []
+    for line in text.split('\n'):
+        if (removeIntros and INTRO_LINE_REGEX.match(line)) or (removeHeadings and HEADING_LINE_REGEX.match(line)):
+            continue
+        newLines.append(line)
+    text = '\n'.join(newLines)
+    if 'footnotes' not in includedParts:
+        text = FOOTNOTE_REGEX.sub('', text)
+    if 'xrefs' not in includedParts:
+        text = XREF_REGEX.sub('', text)
+    return text
+
+
+# --- British -> American spelling and terminology ----------------------------
+
+def _build_american_spellings():
+    """ Returns a dict of lowercase British word -> American word. """
+    words = {}
+    # -our -> -or (with prefixes and suffixes)
+    for stem in ('ardour armour behaviour candour clamour colour demeanour misdemeanour endeavour enamour favour '
+                 'fervour flavour harbour honour humour labour neighbour odour parlour rancour rigour rumour '
+                 'saviour savour splendour tumour valour vapour vigour').split():
+        for prefix in ('', 'dis', 'un', 'multi'):
+            for suffix in ('', 's', 'ed', 'ing', 'er', 'ers', 'able', 'ably', 'ite', 'ites', 'itism', 'y',
+                           'ful', 'fully', 'less', 'hood', 'hoods', 'ably'):
+                words[prefix + stem + suffix] = prefix + stem.replace('our', 'or') + suffix
+    # -ise -> -ize
+    for stem in ('agonis apologis authoris baptis capitalis catechis characteris christianis civilis colonis '
+                 'computeris criticis digitis disorganis dramatis emphasis energis epitomis evangelis familiaris '
+                 'fantasis fertilis finalis formalis generalis harmonis hellenis hospitalis hypnotis idealis idolis '
+                 'immortalis internalis itemis jeopardis judais legalis legitimis liberalis localis materialis '
+                 'maximis memoris mesmeris minimis mobilis modernis monopolis moralis nationalis naturalis '
+                 'neutralis normalis optimis organis ostracis parenthesis patronis penalis personalis plagiaris '
+                 'pluralis polaris popularis pressuris prioritis privatis proselytis publicis pulveris rationalis '
+                 'realis recognis reorganis revitalis romanis sanitis satiris scandalis scrutinis secularis '
+                 'sensitis socialis solemnis specialis stabilis standardis sterilis stigmatis subsidis summaris '
+                 'symbolis sympathis synthesis terroris theoris trivialis tyrannis unauthoris unorganis urbanis '
+                 'utilis vandalis vaporis verbalis victimis visualis vocalis westernis').split():
+        for suffix in ('e', 'es', 'ed', 'ing', 'er', 'ers', 'ation', 'ations', 'able'):
+            words[stem + suffix] = stem[:-1] + 'z' + suffix
+    # -yse -> -yze
+    for stem, suffixes in (('paralys', ('e', 'es', 'ed', 'ing')), ('analys', ('e', 'ed', 'ing', 'er', 'ers')),
+                           ('catalys', ('e', 'ed', 'ing'))):
+        for suffix in suffixes:
+            words[stem + suffix] = stem[:-1] + 'z' + suffix
+    # -re -> -er
+    for word in ('metre centimetre millimetre kilometre litre millilitre centre theatre sceptre sepulchre mitre '
+                 'ochre fibre sabre sombre meagre lustre spectre calibre').split():
+        american = word[:-2] + 'er'
+        words[word], words[word + 's'] = american, american + 's'
+    words.update({'centred': 'centered', 'centring': 'centering', 'manoeuvre': 'maneuver',
+                  'manoeuvres': 'maneuvers', 'manoeuvred': 'maneuvered', 'manoeuvring': 'maneuvering'})
+    # Doubled l -> single l (unstressed final syllable)
+    for stem in ('barrel bevel cancel channel counsel cudgel dial duel enamel equal fuel funnel gravel grovel '
+                 'jewel kennel label level libel marshal marvel model panel pedal pencil quarrel refuel revel '
+                 'rival shovel signal snivel spiral stencil tassel total travel tunnel unravel').split():
+        for suffix in ('ed', 'ing', 'er', 'ers', 'or', 'ors', 'ous', 'ously'):
+            words[stem + 'l' + suffix] = stem + suffix
+    # Other spellings
+    for pair in ('grey gray, greys grays, greyer grayer, greyish grayish, greying graying, greyness grayness, '
+                 'greyed grayed, plough plow, ploughs plows, ploughed plowed, ploughing plowing, '
+                 'ploughman plowman, ploughmen plowmen, ploughshare plowshare, ploughshares plowshares, '
+                 'judgement judgment, judgements judgments, acknowledgement acknowledgment, '
+                 'acknowledgements acknowledgments, towards toward, amongst among, whilst while, '
+                 'learnt learned, dreamt dreamed, spoilt spoiled, burnt burned, axe ax, practise practice, practises practices, '
+                 'practised practiced, practising practicing, fulfil fulfill, fulfils fulfills, '
+                 'fulfilment fulfillment, fulfilments fulfillments, enrol enroll, enrols enrolls, '
+                 'enrolment enrollment, instil instill, instils instills, distil distill, distils distills, '
+                 'skilful skillful, skilfully skillfully, unskilful unskillful, wilful willful, wilfully willfully, '
+                 'storey story, storeys stories, haemorrhage hemorrhage, haemorrhages hemorrhages, '
+                 'haemorrhaging hemorrhaging, defence defense, defences defenses, defenceless defenseless, '
+                 'offence offense, offences offenses, licence license, licences licenses, pretence pretense, '
+                 'pretences pretenses, mould mold, moulds molds, moulded molded, moulding molding, '
+                 'mouldings moldings, mouldy moldy, moulder molder, moulders molders, smoulder smolder, '
+                 'smoulders smolders, smouldered smoldered, smouldering smoldering, moult molt, moulted molted, '
+                 'jewellery jewelry, woollen woolen, woollens woolens, sceptic skeptic, sceptics skeptics, '
+                 'sceptical skeptical, scepticism skepticism, enquire inquire, enquires inquires, '
+                 'enquired inquired, enquiring inquiring, enquiry inquiry, enquiries inquiries, '
+                 'programme program, programmes programs, cheque check, cheques checks, aluminium aluminum, '
+                 'mediaeval medieval, encyclopaedia encyclopedia, foetus fetus, foetuses fetuses, '
+                 'diarrhoea diarrhea, anaemia anemia, anaemic anemic, oedema edema, faeces feces, '
+                 'oesophagus esophagus, ageing aging, gaol jail, gaols jails, gaoler jailer, gaolers jailers, '
+                 'kerb curb, aeroplane airplane, aeroplanes airplanes').split(', '):
+        british, american = pair.split()
+        words[british] = american
+    # American terminology
+    for pair in ('rubbish garbage, corn grain, tonne metric_ton, tonnes metric_tons, biscuit wafer, '
+                 'biscuits wafers, fortnight two_weeks, fortnights two_weeks').split(', '):
+        british, american = pair.split()
+        words[british] = american.replace('_', ' ')
+    return words
+
+
+AMERICAN_SPELLINGS = _build_american_spellings()
+SPELLING_WORD_REGEX = re.compile(r'(?<![\\+])(?<![^\W_])[^\W\d_]+') # A run of letters (not a marker; LV uses _ between words)
+SPELLING_PROTECT_REGEX = re.compile(r'(\|[^\\]*|\S*(?:https?://|www\.)\S*'
+                                    r'|\S+\.(?:tsv|png|jpe?g|svg|ESFM|USFM|SFM|usfm|md|txt|json)\b)')
+SPELLING_SKIP_LINE_MARKERS = ('\\id ', '\\ide ', '\\usfm ', '\\rem ESFM', '\\rem WORDTABLE')
+# 'burnt offering(s)' and 'burnt sacrifice(s)' stay as they are
+#   (allowing for word numbers, markers, and the LV's _ and ÷ word joiners)
+BURNT_KEEP_REGEX = re.compile(r'(?:¦[0-9]+)?(?:[\s_÷]|\\\+?[a-z]+[0-9]*\*?|[?+=<>≡&@*#%^$≈])*(?:offering|sacrifice)',
+                              re.IGNORECASE)
+
+
+def match_case(original, replacement):
+    if len(original) > 1 and original.isupper():
+        return replacement.upper()
+    if original[0].isupper():
+        return replacement[0].upper() + replacement[1:]
+    return replacement
+
+
+def americanise(text):
+    """ Change British spelling and terminology to American (not in figures, URLs, filenames or attributes). """
+    def replace_word(match):
+        word = match.group(0)
+        if word.lower() == 'burnt' and BURNT_KEEP_REGEX.match(match.string, match.end()):
+            return word
+        american = AMERICAN_SPELLINGS.get(word.lower())
+        return match_case(word, american) if american else word
+
+    newLines = []
+    for line in text.split('\n'):
+        if line.startswith(SPELLING_SKIP_LINE_MARKERS):
+            newLines.append(line)
+            continue
+        parts = SPELLING_PROTECT_REGEX.split(line)
+        for index in range(0, len(parts), 2): # The odd-numbered parts are the protected ones
+            part = SPELLING_WORD_REGEX.sub(replace_word, parts[index])
+            # 'spelt' is also a type of wheat, so only change it where it's about spelling
+            part = re.sub(r"\b([Ss])pelt(?=\s+(?:as\b|‘|'|\())", r'\1pelled', part)
+            parts[index] = part
+        newLines.append(''.join(parts))
+    return '\n'.join(newLines)
+
+
+def is_usa_edition(answers):
+    """
+    True if the only text change is American spelling, and both RV and LV ESFM files are exported
+        with their word numbers. (The book selection and book order don't count as text changes.)
+    Then the export is a 'USA edition' rather than an 'Adapted' OET.
+    """
+    a = effective_answers(answers)
+    return a['spelling'] == 'US' and a['version'] == 'BOTH' and a['word_numbers'] == 'keep' \
+        and a['parts'] == ALL_PARTS and a['divine_name'] == 'Yahweh' and a['names'] == 'RV' \
+        and a['esfm_markers'] == 'all'
+
+
+USA_EDITION_SPELLING_LINE = '\\li1 This USA edition has been created by changing some spelling and vocabulary from the British edition.'
+
+
+def mark_usa_edition(text, BBB, VV, usaEdition):
+    """
+    For American spelling exports:
+        LV \\id lines get ' USA edition' appended,
+        RV \\id lines get 'USA edition ' before the version number (only for a USA edition),
+        FRT gets '\\mt3 USA edition' before the first \\pc line, and its \\li1 line about
+            British spelling is replaced.
+    """
+    lines = text.split('\n')
+    if lines[0].startswith('\\id '):
+        if VV == 'LV':
+            lines[0] = lines[0].rstrip() + ' USA edition'
+        elif usaEdition:
+            lines[0] = re.sub(r'(?<!\S)(v[0-9]+(?:\.[0-9]+)*)\s*$', r'USA edition \1', lines[0].rstrip())
+    if BBB == 'FRT':
+        lines = [USA_EDITION_SPELLING_LINE if line.startswith('\\li1 ') and 'British spelling' in line else line
+                 for line in lines]
+        for index, line in enumerate(lines):
+            if line.startswith('\\pc ') or line == '\\pc':
+                lines.insert(index, '\\mt3 USA edition')
+                break
+    return '\n'.join(lines)
 
 
 # --- Yahweh -> the LORD -----------------------------------------------------
@@ -639,10 +861,39 @@ def add_adapted(text):
 
 # --- ESFM -> USFM and USFM -> VPL --------------------------------------------
 
-ADD_PREFIX_CHARS = '?+¿=<>≡&*@#%^≈!'
+ADD_REMOVE_CHARS = '+=<>≡&@*#%^$≈' # \add fields starting with one of these (optionally with ?) lose their markers
+ADD_REMOVE_REGEX = re.compile(r'\\(\+?)add \??[' + re.escape(ADD_REMOVE_CHARS) + r']\??(.*?)\\\1add\*')
+ADD_NAME_REGEX = re.compile(r'\\(\+?)add !')
+ADD_NAME_FIELD_REGEX = re.compile(r' ?\\(\+?)add !.*?\\\1add\*')
+PARALLELISM_CHARS = ('≈', '⇔') # Psalm parallelism and 'verse text reordered' markers
 
 
-def esfm_to_usfm(text, VV, code):
+def simplify_markers(text, VV, traditionalNames):
+    """
+    Keep only the essential formatting markers (as needed for USFM):
+        \\add fields starting with [+=<>≡&@*#%^$≈] (optionally with ?) are replaced by their text,
+        \\add ! (name explanation) fields become straight \\add fields, or are deleted if changing
+            back to traditional names,
+        straight \\add fields stay (with any ? removed),
+        Psalm parallelism (≈) and reordering (⇔) markers are removed.
+    """
+    if VV == 'LV':
+        text = text.replace('\\add ¿\\add*', '') # Remove those added hyphens
+    while True: # (repeat for any nested \+add fields)
+        newText = ADD_REMOVE_REGEX.sub(r'\2', text)
+        if newText == text:
+            break
+        text = newText
+    if VV == 'RV' and traditionalNames:
+        text = ADD_NAME_FIELD_REGEX.sub('', text)
+    text = ADD_NAME_REGEX.sub(r'\\\1add ', text)
+    text = re.sub(r'\\(\+?)add \?', r'\\\1add ', text)
+    for char in PARALLELISM_CHARS:
+        text = text.replace(char, '')
+    return text
+
+
+def esfm_to_usfm(text, VV, code, traditionalNames):
     """
     Convert ESFM (with word numbers already removed) to plain USFM.
     Based on convert_OET-LV-RV_ESFM_to_USFM.py in the OET repo.
@@ -652,15 +903,12 @@ def esfm_to_usfm(text, VV, code):
     text = WORD_NUMBER_REGEX.sub('', text)
     if VV == 'LV': # Our LV ESFM has no paragraph marker after \c lines
         text = re.sub(r'^\\c ([0-9]{1,3})\n\\v ', r'\\c \1\n\\nb\n\\v ', text, flags=re.MULTILINE)
-        text = text.replace('\\add ¿\\add*', '') # Remove those added hyphens
-    text = re.sub(r'\\(\+?)add [' + re.escape(ADD_PREFIX_CHARS) + ']{1,2}', r'\\\1add ', text)
+    text = simplify_markers(text, VV, traditionalNames)
     text = text.replace('\\untr ', '').replace('\\untr*', '')
     if VV == 'RV':
         text = re.sub(r'\\z[a-z0-9]+\*', '', text) # Psalm/Song thematic colouring markers
         text = re.sub(r'\\z[a-z0-9]+ ', '', text)
-        text = (text.replace("'", '’') # Convert apostrophes
-                    .replace('\\q1 ≈', '\\q1 ').replace('\\q2 ≈', '\\q2 ') # Remove 'parallelism' marker
-                    .replace(' ⇔', ' ')) # Remove "verse text swapped in order" marker
+        text = text.replace("'", '’') # Convert apostrophes
         newLines = []
         for line in text.split('\n'):
             if line.startswith('\\rem /'): # our additional section headings, etc.
@@ -683,6 +931,8 @@ def clean_vpl_text(text, VV):
     text = re.sub(r'\|[^\\]*(?=\\\+?w\*)', '', text) # \w word|attributes\w*
     text = re.sub(r'\\\+?[a-z]+[0-9]*\*', '', text) # All remaining closing markers
     text = re.sub(r'\\\+?[a-z]+[0-9]* ?', '', text) # and opening markers
+    for char in PARALLELISM_CHARS:
+        text = text.replace(char, '')
     if VV == 'LV':
         text = text.replace('_', ' ')
     return re.sub(r'\s+', ' ', text).strip()
@@ -748,6 +998,9 @@ def run_export(source, answers, log, keep_gui_alive=lambda: None):
 
     order = OET_RV_ORDER if a['book_order'] == 'OET-RV' else TRADITIONAL_ORDER
     versions = {'RV': ['RV'], 'LV': ['LV'], 'BOTH': ['RV', 'LV']}[a['version']]
+    usaEdition = is_usa_edition(a) # If so, no 'Adapted' changes
+    if usaEdition:
+        log('This is a USA edition (only the spelling is changed), so OET isn’t being renamed to ‘Adapted OET’.')
     wordTablesNeeded = set()
     totalFiles = 0
     for VV in versions:
@@ -763,11 +1016,17 @@ def run_export(source, answers, log, keep_gui_alive=lambda: None):
             text = source.read_text(available[BBB])
             code = usfm_code(BBB, text)
             prefix = f'{USFM_BOOK_NUMBERS.get(code, "ZZ")}_' # Standard USFM book number (USFM files)
-            if VV == 'RV' and namesTable:
+            traditionalNames = VV == 'RV' and namesTable is not None
+            text = remove_parts(text, BBB, a['parts'])
+            if traditionalNames:
                 text = change_to_traditional_names(text, BBB, namesTable)
             if VV == 'RV' and a['divine_name'] == 'LORD':
                 text = change_yahweh_to_lord(text, BBB)
-            text = add_adapted(text)
+            if a['spelling'] == 'US':
+                text = americanise(text)
+                text = mark_usa_edition(text, BBB, VV, usaEdition)
+            if not usaEdition:
+                text = add_adapted(text)
             if a['word_numbers'] == 'keep':
                 for tableName in re.findall(r'^\\rem WORDTABLE (\S+)', text, flags=re.MULTILINE):
                     wordTablesNeeded.add(tableName)
@@ -775,11 +1034,12 @@ def run_export(source, answers, log, keep_gui_alive=lambda: None):
                 text = remove_word_numbers(text)
             written = []
             if 'ESFM' in formats:
+                esfmText = simplify_markers(text, VV, traditionalNames) if a['esfm_markers'] == 'essential' else text
                 esfmCount += 1
-                (formatFolders['ESFM'] / f'{esfmCount:0{width}}_OET-{VV}_{BBB}.ESFM').write_text(text, encoding='utf-8')
+                (formatFolders['ESFM'] / f'{esfmCount:0{width}}_OET-{VV}_{BBB}.ESFM').write_text(esfmText, encoding='utf-8')
                 written.append('ESFM')
             if 'USFM' in formats or 'VPL' in formats:
-                usfmText = esfm_to_usfm(text, VV, code)
+                usfmText = esfm_to_usfm(text, VV, code, traditionalNames)
                 if 'USFM' in formats:
                     (formatFolders['USFM'] / f'{prefix}OET-{VV}_{code}.USFM').write_text(usfmText, encoding='utf-8')
                     written.append('USFM')
@@ -929,7 +1189,8 @@ class ExportWizard(tk.Toplevel):
             self.var = {}
             for value, text in question.options:
                 self.var[value] = tk.BooleanVar(value=value in current)
-                ttk.Checkbutton(self.body, text=text, variable=self.var[value]).pack(anchor='w', pady=2)
+                ttk.Checkbutton(self.body, text=text, variable=self.var[value],
+                                command=self.update_next_text).pack(anchor='w', pady=2)
             ttk.Label(self.body, text='Default: ' + question.answer_text(question.default),
                       foreground='grey').pack(anchor='w', pady=(4, 0))
         self.remember_var = tk.BooleanVar(value=self.remember[step])
@@ -958,7 +1219,7 @@ class ExportWizard(tk.Toplevel):
             return True
         if isinstance(self.var, dict):
             values = [v for v, _t in QUESTIONS_BY_KEY[step].options if self.var[v].get()]
-            if validate and not values:
+            if validate and not values and not QUESTIONS_BY_KEY[step].allow_none:
                 messagebox.showwarning('Export settings', 'Please select at least one option.', parent=self)
                 return False
             self.answers[step] = values
@@ -994,7 +1255,7 @@ class OETAdapterApp:
     def __init__(self, root):
         self.root = root
         root.title(f'{PROGRAM_NAME} v{PROGRAM_VERSION}')
-        root.minsize(760, 560)
+        root.minsize(760, 720)
         self.global_settings = read_toml(GLOBAL_SETTINGS_PATH)
         self.source = None
         self.answers = None

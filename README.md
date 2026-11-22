@@ -1,5 +1,5 @@
 # OpenEnglishTranslation_adapter
-An adapter/exporter to create custom versions of the Open English Translation of the Bible
+An adapter/exporter to create custom versions of the *Open English Translation of the Bible*
 
 ## Running the program
 
@@ -50,7 +50,7 @@ python3 OET_adapter.py
 
 ### 1. Finding the OET source files
 
-The program exports from the ESFM files in the [OET repo](https://github.com/Freely-Given-org/OpenEnglishTranslation--OET).
+The program exports from the ESFM files in the [OET repo](https://GitHub.com/Freely-Given-org/OpenEnglishTranslation--OET).
 At startup it looks for that repo in a parallel folder (`../OpenEnglishTranslation--OET`):
 
 - If it's found, it asks whether to refresh it (`git pull`) before each export.
@@ -68,10 +68,13 @@ Otherwise, or if you choose **New export settings…**, it asks these questions 
 | Version(s) | OET-RV, OET-LV, or both |
 | Books | Any combination of front matter, OT, DC, NT, back matter (default all) |
 | Book order (if RV included) | OET-RV book order, or traditional order (used to number the ESFM and VPL files) |
+| Included parts | Any combination (or none) of book introductions, section headings, footnotes, cross-references (default all) |
+| Spelling | Remain in British spelling, or change to American spelling and terminology |
 | Divine name (if RV included) | Leave ‘Yahweh’, or change to ‘the LORD’ |
 | Names (if RV included) | Use the OET-RV names, or change back to traditional names |
 | Word numbers | Remove them (and the `\rem WORDTABLE` line), or keep them |
 | File types (if word numbers removed) | Any combination of ESFM, USFM (default), VPL |
+| ESFM markers (if ESFM exported) | Leave the additional formatting markers, or just keep the essential ones |
 
 If word numbers are kept, only ESFM files are exported.
 
@@ -79,7 +82,7 @@ Each question has a "Save this answer as a global setting" checkbox. Saved answe
 (the first page offers **No**, **Yes (skip questions with preselected global settings)**, or **Yes, and then delete all global export settings**).
 
 When you finish, the settings are saved as `XXX.export.toml`, where `XXX` is built from your answers, e.g.
-`RVLV_ALLBks_RVOrder_LORD_TradNames_NoWordNums_ALLFormats`. The selected answers are shown in the main window.
+`RVLV_ALLBks_RVOrder_NoFNs_UK_LORD_TradNames_NoWordNums_ALLFormats_Simple`. The selected answers are shown in the main window.
 
 ### 3. Running the export
 
@@ -90,12 +93,29 @@ Click **Run export**. Files are written to `exportedFiles/XXX/` (if that folder 
 - ESFM and VPL filenames start with a number (from 01) giving the chosen book order, e.g. with OET-RV order `01_OET-RV_FRT.ESFM`, `08_OET-RV_JOB.ESFM`, `01_OET-RV_GEN.vpl`, `06_OET-RV_JOB.vpl` (VPL has no front matter files as they have no verses).
 - ESFM files keep the OET's own book codes (e.g. `OET-RV_KI1.ESFM`). USFM and VPL files use USFM book abbreviations (e.g. `OET-RV_1KI.USFM`).
 - If word numbers are kept, the word table files that the ESFM files refer to are copied too.
-- USFM files have the ESFM-specific formatting removed (based on `convert_OET-LV-RV_ESFM_to_USFM.py` in the OET repo).
-- VPL files have one file per book, with one line per verse like `GEN 1:1<tab>verse text` (Psalm titles go in verse 0).
+- USFM files have the ESFM-specific formatting removed (based on `convert_OET-LV-RV_ESFM_to_USFM.py` in the OET repo):
+  - `\add` fields that start with one of `+=<>≡&@*#%^$≈` (optionally with `?`) lose their markers but keep their text.
+  - `\add !` name explanations become plain `\add` fields (or are deleted completely when changing back to traditional names).
+  - Plain `\add` fields stay (any `?` at the start is removed).
+  - The Psalm parallelism (`≈`) and reordering (`⇔`) markers are removed.
+- ESFM files with "just keep the essential ones" get the same marker changes as the USFM files (but keep everything else ESFM).
+- VPL files have one file per book, with one line per verse like `GEN 1:1<tab>verse text` (Psalm titles go in verse 0). All character formatting markers and the `≈` and `⇔` markers are removed.
 
 ### Text changes
 
 In every exported file (RV and LV), each ‘Open English Translation’ and ‘OET’ (including ‘OET-RV’ and ‘OET-LV’) becomes ‘Adapted Open English Translation’ / ‘Adapted OET’, e.g. on `\id` lines and in the front matter and introductions. Figures (`\fig`), URLs and filenames (like the `\rem WORDTABLE` line) are left unchanged.
+
+The exception is a **USA edition**: when American spelling is the only text change (all parts included, ‘Yahweh’ and the RV names left, all ESFM markers kept) and both the RV and LV are exported as ESFM files with word numbers. Then nothing is renamed to ‘Adapted’, and instead the RV `\id` lines get ‘USA edition’ before the version number, e.g. `\id MRK - Open English Translation—Readers' Version (OET-RV) USA edition v0.5.11`. (The book selection and book order don’t affect this.)
+
+Whenever American spelling is chosen:
+
+- the LV `\id` lines get ‘ USA edition’ added to the end, e.g. `\id MRK USA edition`
+- the front matter (FRT) gets `\mt3 USA edition` before its first `\pc` line, and its `\li1` line about British spelling becomes ‘This USA edition has been created by changing some spelling and vocabulary from the British edition.’
+
+These apply to the RV and LV:
+
+- **Included parts:** Unselected parts are removed: book introductions (except in front and back matter books), section headings (including `\ms`, `\mr`, `\r`, `\sr` and the OET-RV’s extra `\rem /s1` headings), footnotes, and/or cross-references.
+- **American spelling:** British spellings are changed using a built-in list (e.g. honour → honor, realise → realize, metre → meter, travelled → traveled, judgement → judgment, towards → toward, grey → gray, axe → ax, burnt → burned but not in ‘burnt offering(s)’ or ‘burnt sacrifice(s)’). Capitalisation is kept, and URLs, filenames and marker attributes aren’t changed. A few words are also changed to American terms: rubbish → garbage, corn → grain, tonnes → metric tons, biscuits → wafers, fortnight → two weeks. ‘Spelt’ becomes ‘spelled’ only where it’s about spelling (not the grain), and ‘Tyre’ (the city) is left alone.
 
 These apply to the OET-RV only:
 
@@ -110,3 +130,7 @@ These apply to the OET-RV only:
 | `globalSettings.toml` | Source repo settings and saved global export answers (created by the program) |
 | `*.export.toml` | Saved, named export settings (created by the program) |
 | `exportedFiles/` | Exported files |
+
+## Additional notes
+
+The format codes in the original *OET* [ESFM](https://GitHub.com/Freely-Given-org/ESFM) files are explained [here](https://OpenEnglishTranslation.Bible/Resources/Formats/).
