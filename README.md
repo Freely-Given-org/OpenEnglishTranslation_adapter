@@ -48,6 +48,15 @@ python3 OET_adapter.py
 
 ## How the program works
 
+### Checking for a newer version
+
+At startup the program checks GitHub for a newer version of itself:
+
+- If this folder is a `git clone` (on the `main` branch), it offers to update it with `git pull` and then restart.
+- Otherwise (e.g. if it was downloaded as a ZIP file), it tells you if a newer version number is available to download.
+
+If GitHub can't be reached (e.g. when offline), it just carries on.
+
 ### 1. Finding the OET source files
 
 The program exports from the ESFM files in the [OET repo](https://GitHub.com/Freely-Given-org/OpenEnglishTranslation--OET).

@@ -17,15 +17,17 @@ Output goes into exportedFiles/XXX/ (with ESFM/, USFM/, VPL/ subfolders only if
 more than one file type is exported).
 
 CHANGELOG:
-  2026-11-24 Added LICENSE and README.md files to the outputs
+  2026-11-24 Added LICENSE and README.md files to the outputs, plus a program version check
 """
 import csv
 import datetime
 import json
+import os
 import posixpath
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import urllib.error
@@ -36,7 +38,7 @@ from tkinter import ttk, messagebox, filedialog
 
 
 PROGRAM_NAME = 'OET Adapter'
-PROGRAM_VERSION = '0.5.0'
+PROGRAM_VERSION = '0.5.1'
 
 APP_FOLDER = Path(__file__).resolve().parent
 GLOBAL_SETTINGS_PATH = APP_FOLDER / 'globalSettings.toml'
@@ -53,6 +55,9 @@ REPO_FOLDER_NAME = 'OpenEnglishTranslation--OET'
 PARALLEL_REPO_PATH = APP_FOLDER.parent / REPO_FOLDER_NAME
 USER_AGENT = f'OET_adapter/{PROGRAM_VERSION}'
 ADAPTER_URL = 'https://github.com/Freely-Given-org/OpenEnglishTranslation_adapter'
+ADAPTER_CLONE_URL = f'{ADAPTER_URL}.git'
+ADAPTER_RAW_URL = 'https://raw.githubusercontent.com/Freely-Given-org/OpenEnglishTranslation_adapter/main/OET_adapter.py'
+GIT_ENV = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'} # Never let git wait for a password
 OET_FORMATS_URL = 'https://OpenEnglishTranslation.Bible/Resources/Formats/'
 
 # Where the ESFM source files live in the OET repo
@@ -1233,6 +1238,50 @@ def run_export(source, answers, log, keep_gui_alive=lambda: None):
 
 
 # ---------------------------------------------------------------------------
+# Checking for a newer version of this program
+# ---------------------------------------------------------------------------
+
+def version_tuple(version):
+    return tuple(int(n) for n in re.findall(r'[0-9]+', version))
+
+
+def latest_program_version():
+    """ Returns the PROGRAM_VERSION of the program on GitHub (or None if we can't get it). """
+    try:
+        request = urllib.request.Request(ADAPTER_RAW_URL, headers={'User-Agent': USER_AGENT})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            match = re.search(r"^PROGRAM_VERSION = '([^']+)'", response.read().decode('utf-8'), flags=re.MULTILINE)
+        return match.group(1) if match else None
+    except (OSError, ValueError):
+        return None
+
+
+def git_output(*args):
+    """ Runs git in the program folder and returns its output (or None if it failed). """
+    try:
+        result = subprocess.run(['git', '-C', str(APP_FOLDER), *args], capture_output=True, text=True,
+                                timeout=20, env=GIT_ENV)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def program_git_status():
+    """ If this program is in a git clone, returns (newerOnGitHub, currentBranch), otherwise None.
+        newerOnGitHub is None if we couldn't contact GitHub. """
+    if not (APP_FOLDER / '.git').exists() or git_output('rev-parse', '--git-dir') is None:
+        return None
+    branch = git_output('rev-parse', '--abbrev-ref', 'HEAD')
+    remote = git_output('ls-remote', ADAPTER_CLONE_URL, 'refs/heads/main') # Anonymous HTTPS, so no password needed
+    if not remote:
+        return None, branch
+    remoteCommit = remote.split()[0]
+    # If GitHub's latest commit is already in our history, we're up to date (or ahead)
+    upToDate = git_output('merge-base', '--is-ancestor', remoteCommit, 'HEAD') is not None
+    return not upToDate, branch
+
+
+# ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
 
@@ -1489,12 +1538,12 @@ class OETAdapterApp:
         write_toml(GLOBAL_SETTINGS_PATH, self.global_settings,
                    header=f'Global settings for {PROGRAM_NAME} (written by the program)')
 
-    def run_command(self, args, cwd=None):
+    def run_command(self, args, cwd=None, env=None):
         """ Runs a command showing its output in the log. Returns True on success. """
         self.log('$ ' + ' '.join(str(a) for a in args))
         try:
             process = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=True, encoding='utf-8', errors='replace')
+                                       text=True, encoding='utf-8', errors='replace', env=env)
         except FileNotFoundError:
             self.log(f'ERROR: Unable to run {args[0]} (is it installed?)')
             return False
@@ -1505,8 +1554,54 @@ class OETAdapterApp:
     # --- Startup ---
 
     def startup(self):
+        if self.check_for_newer_program(): # Restarting
+            return
         self.setup_source()
         self.offer_saved_settings()
+
+    def check_for_newer_program(self):
+        """ Tell the user if there's a newer version of this program on GitHub (and offer to update a git clone).
+            Returns True if the program is restarting. """
+        self.log(f'Checking for a newer version of {PROGRAM_NAME}…')
+        latestVersion = latest_program_version()
+        gitStatus = program_git_status()
+        if gitStatus is not None: # It's a git clone, so check commits (not just the version number)
+            newer, branch = gitStatus
+        else:
+            newer = latestVersion is not None and version_tuple(latestVersion) > version_tuple(PROGRAM_VERSION)
+        if newer is None or (gitStatus is None and latestVersion is None):
+            self.log('  Unable to check GitHub (are you offline?)')
+            return False
+        if not newer:
+            self.log(f'  You have the latest version (v{PROGRAM_VERSION}).')
+            return False
+        what = f'Version {latestVersion}' \
+            if latestVersion and version_tuple(latestVersion) > version_tuple(PROGRAM_VERSION) else 'A newer copy'
+        message = f'{what} of {PROGRAM_NAME} is available on GitHub (you have v{PROGRAM_VERSION}).'
+        self.log(f'  {message}')
+        if gitStatus is None:
+            messagebox.showinfo('Newer version available', f'{message}\n\nYou can download it from\n{ADAPTER_URL}',
+                                parent=self.root)
+            return False
+        if branch != 'main':
+            messagebox.showinfo('Newer version available', f'{message}\n\nThis copy is on the ‘{branch}’ branch, '
+                                f'so it can’t be updated automatically. Use git to update it from {ADAPTER_URL}',
+                                parent=self.root)
+            return False
+        if not messagebox.askyesno('Newer version available',
+                                   f'{message}\n\nDo you want to update it now (with git pull)?', parent=self.root):
+            return False
+        if not self.run_command(['git', 'pull', '--ff-only', ADAPTER_CLONE_URL, 'main'], cwd=APP_FOLDER, env=GIT_ENV):
+            messagebox.showwarning('Update failed', f'Unable to update {PROGRAM_NAME} (see the log).\n\n'
+                                   f'You can update it yourself by running ‘git pull’ in\n{APP_FOLDER}',
+                                   parent=self.root)
+            return False
+        if messagebox.askyesno('Updated', f'{PROGRAM_NAME} has been updated. Restart it now?', parent=self.root):
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve())], cwd=APP_FOLDER)
+            self.root.destroy()
+            return True
+        self.log('  The update will be used the next time you start the program.')
+        return False
 
     def setup_source(self, force=False):
         """ Decide where the OET files come from (stored in the global settings). """
