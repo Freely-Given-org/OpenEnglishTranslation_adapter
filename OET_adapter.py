@@ -15,9 +15,14 @@ Settings files (kept in the same folder as this program):
 
 Output goes into exportedFiles/XXX/ (with ESFM/, USFM/, VPL/ subfolders only if
 more than one file type is exported).
+
+CHANGELOG:
+  2026-11-24 Added LICENSE and README.md files to the outputs
 """
 import csv
+import datetime
 import json
+import posixpath
 import re
 import shutil
 import subprocess
@@ -31,7 +36,7 @@ from tkinter import ttk, messagebox, filedialog
 
 
 PROGRAM_NAME = 'OET Adapter'
-PROGRAM_VERSION = '0.4.0'
+PROGRAM_VERSION = '0.5.0'
 
 APP_FOLDER = Path(__file__).resolve().parent
 GLOBAL_SETTINGS_PATH = APP_FOLDER / 'globalSettings.toml'
@@ -47,6 +52,8 @@ API_CONTENTS_URL = f'https://api.github.com/repos/{GITHUB_OWNER_REPO}/contents/'
 REPO_FOLDER_NAME = 'OpenEnglishTranslation--OET'
 PARALLEL_REPO_PATH = APP_FOLDER.parent / REPO_FOLDER_NAME
 USER_AGENT = f'OET_adapter/{PROGRAM_VERSION}'
+ADAPTER_URL = 'https://github.com/Freely-Given-org/OpenEnglishTranslation_adapter'
+OET_FORMATS_URL = 'https://OpenEnglishTranslation.Bible/Resources/Formats/'
 
 # Where the ESFM source files live in the OET repo
 RV_FOLDER = 'translatedTexts/ReadersVersion'
@@ -55,6 +62,12 @@ LV_NT_FOLDER = 'derivedTexts/auto_edited_VLT_ESFM'
 LV_DC_FOLDER = 'derivedTexts/auto_edited_DC_ESFM'
 WORD_TABLE_FOLDER = RV_FOLDER # All the word tables are in here
 NAMES_TABLE_PATH = f'{RV_FOLDER}/OET-RV_names_table.tsv'
+# Each text folder has its own LICENSE and README.md (with the copyright and upstream source attributions)
+# (All the LICENSE files are the same: the OET text is all CC BY-SA 4.0)
+TEXT_FOLDER_LABELS = {RV_FOLDER: 'OET-RV (Readers’ Version)',
+                      LV_OT_FOLDER: 'OET-LV (Literal Version) Hebrew Scriptures',
+                      LV_NT_FOLDER: 'OET-LV (Literal Version) Messianic Update',
+                      LV_DC_FOLDER: 'OET-LV (Literal Version) deuterocanonical books'}
 
 
 # ---------------------------------------------------------------------------
@@ -975,6 +988,146 @@ def usfm_to_vpl(usfmText, code, VV):
 # The export itself
 # ---------------------------------------------------------------------------
 
+def markdown_section(markdown, heading_regex):
+    """ Returns the body of the first '## ' section whose heading matches (or ''). """
+    match = re.search(rf'^## (?:{heading_regex})[ \t]*\n(.*?)(?=^## |\Z)', markdown, flags=re.MULTILINE | re.DOTALL)
+    return match.group(1).strip() if match else ''
+
+
+def absolute_links(markdown, folder):
+    """ Make relative Markdown links (from a README in the given repo folder) point to GitHub. """
+    def fix(match):
+        target = match.group(1)
+        if re.match(r'[a-z]+:|#', target, flags=re.IGNORECASE):
+            return match.group(0)
+        return f']({GITHUB_URL}/blob/{GITHUB_BRANCH}/{posixpath.normpath(f"{folder}/{target}")})'
+    return re.sub(r'\]\(([^)\s]+)\)', fix, markdown)
+
+
+def source_description(source):
+    """ Describes where the OET files came from (with the git commit if we can get it). """
+    if source.mode != 'local':
+        return f'downloaded from the `{GITHUB_BRANCH}` branch of the [OET repository]({GITHUB_URL})'
+    try:
+        result = subprocess.run(['git', '-C', str(source.repo_path), 'log', '-1', '--format=%H %cs'],
+                                capture_output=True, text=True, timeout=30)
+        commit, date = result.stdout.split()
+        when = datetime.date.fromisoformat(date)
+        return f'the [OET repository]({GITHUB_URL}) at commit [`{commit[:10]}`]({GITHUB_URL}/commit/{commit}) ' \
+               f'({when.day} {when:%B %Y})'
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return f'a local copy of the [OET repository]({GITHUB_URL})'
+
+
+def make_readme(source, a, name, usaEdition, exported, folders, wordTables):
+    """ Returns the text of the README.md for an export folder.
+        exported is a dict of VV -> list of BOS book codes. """
+    versionNames = ' and '.join(f'OET-{VV}' for VV in exported)
+    title = f'Open English Translation ({versionNames}) USA edition' if usaEdition \
+        else f'Adapted Open English Translation ({versionNames})'
+    today = datetime.date.today()
+    lines = [f'# {title}', '',
+             f'These Bible files were exported on {today.day} {today:%B %Y} by [{PROGRAM_NAME}]({ADAPTER_URL}) v{PROGRAM_VERSION} '
+             f'from {source_description(source)}.',
+             f'Export settings name: `{name}`', '',
+             'The _Open English Translation_ (OET) is a free, open-licensed modern-English Bible translation. '
+             'It has two versions that were designed to be read together: the _Readers’ Version_ (OET-RV) '
+             'and the very literal _Literal Version_ (OET-LV). Read it online at [OET.Bible](https://OET.Bible).', '']
+
+    # Contents
+    lines += ['## Contents', '']
+    useSubfolders = len(a['formats']) > 1
+    for VV, books in exported.items():
+        lines.append(f'- OET-{VV}: {len(books)} books ({", ".join(books)})' if books else f'- OET-{VV}: no books')
+    formatDescriptions = {
+        'ESFM': f'ESFM files (`.ESFM`): [ESFM]({OET_FORMATS_URL}) is the OET’s extended USFM format. '
+                'Filenames start with the book’s position in the chosen book order.',
+        'USFM': 'USFM files (`.USFM`): standard [USFM](https://ubsicap.github.io/usfm/) for Paratext and other Bible software. '
+                'Filenames start with the standard Paratext book number.',
+        'VPL': 'VPL files (`.vpl`): one verse per line, like `GEN 1:1<tab>verse text`, with no formatting. '
+               'Filenames start with the book’s position in the chosen book order.'}
+    for fmt in a['formats']:
+        lines.append(f'- {"`" + fmt + "/` folder: " if useSubfolders else ""}{formatDescriptions[fmt]}')
+    if wordTables:
+        lines.append(f'- Word tables ({", ".join(f"`{t}`" for t in wordTables)}) '
+                     'that the ESFM word numbers (like `¦123`) refer to.')
+    lines.append('- `LICENSE`: the full licence text.')
+    lines.append('')
+
+    # Settings
+    lines += ['## Export settings', '', '| Setting | Choice |', '| --- | --- |']
+    for q in QUESTIONS:
+        if q.applies(a):
+            lines.append(f'| {q.label} | {q.answer_text(a[q.key])} |')
+    lines.append('')
+
+    # Changes (required by the CC BY-SA licence)
+    changes = []
+    if len(exported) == 1:
+        changes.append(f'Only the OET-{next(iter(exported))} is included '
+                       '(the OET-RV and OET-LV were designed to be used together).')
+    if a['sections'] != ALL_SECTIONS:
+        changes.append('Only some books are included (see above).')
+    if rv_included(a) and a['book_order'] == 'traditional':
+        changes.append('The books are numbered in the traditional order (rather than the OET-RV order).')
+    removedParts = [QUESTIONS_BY_KEY['parts'].answer_text([p]).lower() for p in ALL_PARTS if p not in a['parts']]
+    if removedParts:
+        changes.append(f'These parts were removed: {", ".join(removedParts)}.')
+    if a['spelling'] == 'US':
+        changes.append('British spelling was changed to American spelling (e.g., honour → honor, realise → realize), '
+                       'and a few words to American terms (e.g., rubbish → garbage, corn → grain).')
+        changes.append('‘USA edition’ was added to the `\\id` lines and to the front matter.')
+    if rv_included(a) and a['divine_name'] == 'LORD':
+        changes.append('In the OET-RV, ‘Yahweh’ was changed to ‘the LORD’.')
+    if rv_included(a) and a['names'] == 'traditional':
+        changes.append('In the OET-RV, names were changed back to their traditional forms (e.g., Yeshua → Jesus).')
+    if a['word_numbers'] == 'remove':
+        changes.append('The ESFM word numbers and `\\rem WORDTABLE` lines were removed.')
+    if 'ESFM' in a['formats'] and a['esfm_markers'] == 'essential':
+        changes.append('In the ESFM files, the additional OET formatting markers were removed '
+                       '(like the USFM files).')
+    convertedFormats = [fmt for fmt in ('USFM', 'VPL') if fmt in a['formats']]
+    if convertedFormats:
+        changes.append(f'The {" and ".join(convertedFormats)} files were converted from ESFM, '
+                       'and the OET’s extra formatting markers were removed.')
+    if not usaEdition:
+        changes.append('‘Open English Translation’ and ‘OET’ were changed to ‘Adapted Open English Translation’ '
+                       'and ‘Adapted OET’, as requested in the OET licence notes.')
+    lines += ['## Changes from the original OET', '']
+    lines += [f'- {change}' for change in changes] if changes else ['- None']
+    lines.append('')
+
+    # Licence and attribution (from each text folder's README)
+    copyrights, sourceSections = {}, []
+    for folder in folders:
+        folderReadme = source.read_text(f'{folder}/README.md')
+        for match in re.finditer(r'^Copyright .*$', folderReadme, flags=re.MULTILINE):
+            copyright = absolute_links(match.group(0).replace('(c)', '©').rstrip(), folder)
+            key = re.sub(r'\s*\(.*$|\.$', '', copyright) # e.g. 'Copyright © 2010-2026 Robert Hunt'
+            if len(copyright) > len(copyrights.get(key, '')): # Keep the fullest one
+                copyrights[key] = copyright
+        section = markdown_section(folderReadme, r'Sources(?: and attribution)?')
+        if section:
+            sourceSections += [f'### {TEXT_FOLDER_LABELS[folder]}', '', absolute_links(section, folder), '']
+    attributionName = title if usaEdition else f'Adapted from the Open English Translation ({versionNames})'
+    lines += ['## Licence', '', *copyrights.values(), '',
+              'The OET text is licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/deed.en) '
+              '(Creative Commons Attribution-ShareAlike 4.0 International). The full licence text is in `LICENSE`.', '',
+              'You can copy, share and adapt these files, but you must give credit (keep this attribution), '
+              'say what you changed, and share anything you make from them under the same licence.', '',
+              'Please attribute this text as:', '',
+              f'> _{attributionName}_, © Robert Hunt, [OET.Bible](https://OET.Bible), CC BY-SA 4.0', '']
+    if not usaEdition:
+        lines += ['The OET copyright holder also requests that changed versions of the OET text '
+                  '(including using the OET-RV or OET-LV alone) aren’t called the _Open English Translation_, '
+                  'but something like _Adapted from the Open English Translation_.', '']
+    if sourceSections:
+        lines += ['## Sources and attribution', '',
+                  'Please also keep these attributions for the sources that the OET is built on.', '']
+        lines += sourceSections
+    return '\n'.join(lines).rstrip() + '\n'
+
+
 def run_export(source, answers, log, keep_gui_alive=lambda: None):
     """ Export the books according to the answers. Returns the output folder Path. """
     a = effective_answers(answers)
@@ -1002,6 +1155,8 @@ def run_export(source, answers, log, keep_gui_alive=lambda: None):
     if usaEdition:
         log('This is a USA edition (only the spelling is changed), so OET isn’t being renamed to ‘Adapted OET’.')
     wordTablesNeeded = set()
+    foldersUsed = [] # Source text folders (for the LICENSE and README attributions)
+    exported = {VV: [] for VV in versions} # VV -> list of exported book codes
     totalFiles = 0
     for VV in versions:
         log(f'\nExporting OET-{VV}…')
@@ -1051,6 +1206,11 @@ def run_export(source, answers, log, keep_gui_alive=lambda: None):
                             '\n'.join(vplLines) + '\n', encoding='utf-8')
                         written.append('VPL')
             totalFiles += len(written)
+            if written:
+                exported[VV].append(code)
+                sourceFolder = available[BBB].rsplit('/', 1)[0]
+                if sourceFolder not in foldersUsed:
+                    foldersUsed.append(sourceFolder)
             log(f'  {BBB} ({code}): {", ".join(written) if written else "nothing (no verses)"}')
     for tableName in sorted(wordTablesNeeded):
         keep_gui_alive()
@@ -1059,6 +1219,15 @@ def run_export(source, answers, log, keep_gui_alive=lambda: None):
             shutil.copyfile(source.get_path(f'{WORD_TABLE_FOLDER}/{tableName}'), formatFolders['ESFM'] / tableName)
         except (OSError, urllib.error.URLError) as err:
             log(f'  WARNING: Unable to copy {tableName}: {err}')
+    if wordTablesNeeded and WORD_TABLE_FOLDER not in foldersUsed:
+        foldersUsed.append(WORD_TABLE_FOLDER)
+    foldersUsed = sorted(foldersUsed, key=list(TEXT_FOLDER_LABELS).index) or [RV_FOLDER] # For LICENSE and README
+    log('')
+    shutil.copyfile(source.get_path(f'{foldersUsed[0]}/LICENSE'), outputFolder / 'LICENSE')
+    log('Copied LICENSE')
+    readmeText = make_readme(source, a, name, usaEdition, exported, foldersUsed, sorted(wordTablesNeeded))
+    (outputFolder / 'README.md').write_text(readmeText, encoding='utf-8')
+    log('Wrote README.md')
     log(f'\nWrote {totalFiles:,} files to {outputFolder}')
     return outputFolder
 

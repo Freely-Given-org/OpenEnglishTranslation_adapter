@@ -93,6 +93,14 @@ Click **Run export**. Files are written to `exportedFiles/XXX/` (if that folder 
 - ESFM and VPL filenames start with a number (from 01) giving the chosen book order, e.g. with OET-RV order `01_OET-RV_FRT.ESFM`, `08_OET-RV_JOB.ESFM`, `01_OET-RV_GEN.vpl`, `06_OET-RV_JOB.vpl` (VPL has no front matter files as they have no verses).
 - ESFM files keep the OET's own book codes (e.g. `OET-RV_KI1.ESFM`). USFM and VPL files use USFM book abbreviations (e.g. `OET-RV_1KI.USFM`).
 - If word numbers are kept, the word table files that the ESFM files refer to are copied too.
+- The OET text `LICENSE` file (CC BY-SA 4.0) is copied into the export folder.
+- A `README.md` is written into the export folder. It covers:
+  - the title (‘Adapted Open English Translation…’, or ‘…USA edition’)
+  - the export date and the source (the OET repo commit, if it’s a local clone)
+  - the contents, file types and export settings
+  - a list of the changes from the original OET (as the licence requires)
+  - the copyright, licence and suggested attribution
+  - the upstream source attributions from the OET text folders’ own READMEs
 - USFM files have the ESFM-specific formatting removed (based on `convert_OET-LV-RV_ESFM_to_USFM.py` in the OET repo):
   - `\add` fields that start with one of `+=<>≡&@*#%^$≈` (optionally with `?`) lose their markers but keep their text.
   - `\add !` name explanations become plain `\add` fields (or are deleted completely when changing back to traditional names).
