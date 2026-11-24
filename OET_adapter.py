@@ -18,6 +18,7 @@ more than one file type is exported).
 
 CHANGELOG:
   2026-11-24 Added LICENSE and README.md files to the outputs, plus a program version check
+  2026-11-25 Properly remove the ^antithetical and →consequence parallelism markers plus the ⇔reordering marker
 """
 import csv
 import datetime
@@ -38,7 +39,7 @@ from tkinter import ttk, messagebox, filedialog
 
 
 PROGRAM_NAME = 'OET Adapter'
-PROGRAM_VERSION = '0.5.1'
+PROGRAM_VERSION = '0.5.2'
 
 APP_FOLDER = Path(__file__).resolve().parent
 GLOBAL_SETTINGS_PATH = APP_FOLDER / 'globalSettings.toml'
@@ -618,7 +619,7 @@ def clean_for_context(text):
 
 
 SENTENCE_END_CHARS = ('.', '?', '!')
-OPENING_CHARS = ' ≈“‘"('
+OPENING_CHARS = ' ≈^→⇔“‘"(' # Includes the line-initial parallelism and reordering markers
 
 
 def change_yahweh_to_lord(text, BBB):
@@ -883,7 +884,26 @@ ADD_REMOVE_CHARS = '+=<>≡&@*#%^$≈' # \add fields starting with one of these 
 ADD_REMOVE_REGEX = re.compile(r'\\(\+?)add \??[' + re.escape(ADD_REMOVE_CHARS) + r']\??(.*?)\\\1add\*')
 ADD_NAME_REGEX = re.compile(r'\\(\+?)add !')
 ADD_NAME_FIELD_REGEX = re.compile(r' ?\\(\+?)add !.*?\\\1add\*')
-PARALLELISM_CHARS = ('≈', '⇔') # Psalm parallelism and 'verse text reordered' markers
+# OET-RV Hebrew parallelism markers start the second (poetry) line of a parallel set:
+#   ≈ synonymous ('\q1 ≈…'), ^ contrasting ('\q1 ^but…'), → consequence ('\q1 →so…')
+#   They come after any paragraph and/or verse marker, e.g., '\q2 \v 4 ≈…' or '\v 12 ^…'
+#   (Elsewhere these characters start \add fields, e.g., '\add ≈…', which ADD_REMOVE_REGEX handles.)
+PARALLELISM_CHARS = '≈^→'
+PARALLELISM_REGEX = re.compile(r'^((?:\\(?!\+?add )[a-z]+[0-9]* )?(?:\\v [0-9]+\S* )?)['
+                               + re.escape(PARALLELISM_CHARS) + ']', re.MULTILINE)
+REORDERED_CHAR = '⇔' # 'Verse text reordered' marker
+# A book introduction sentence explaining the symbols, e.g., '…with the symbol \bd ≈\bd*, … with \bd →\bd*.'
+PARALLELISM_EXPLANATION_REGEX = re.compile(r'(\\bd [' + re.escape(PARALLELISM_CHARS) + r']\\bd\*[^.\n]*)\.')
+PARALLELISM_REMOVED_NOTE = ', although those characters were removed from this export'
+
+
+def remove_parallelism_markers(text):
+    """
+    Remove the line-initial Hebrew parallelism (≈ ^ →) markers and the reordering (⇔) marker,
+        and note in any introduction that explains the symbols that they've been removed.
+    """
+    text = PARALLELISM_REGEX.sub(r'\1', text).replace(REORDERED_CHAR, '')
+    return PARALLELISM_EXPLANATION_REGEX.sub(r'\1' + PARALLELISM_REMOVED_NOTE + '.', text)
 
 
 def simplify_markers(text, VV, traditionalNames):
@@ -893,7 +913,7 @@ def simplify_markers(text, VV, traditionalNames):
         \\add ! (name explanation) fields become straight \\add fields, or are deleted if changing
             back to traditional names,
         straight \\add fields stay (with any ? removed),
-        Psalm parallelism (≈) and reordering (⇔) markers are removed.
+        Hebrew parallelism (≈ ^ → at the start of a line) and reordering (⇔) markers are removed.
     """
     if VV == 'LV':
         text = text.replace('\\add ¿\\add*', '') # Remove those added hyphens
@@ -906,9 +926,7 @@ def simplify_markers(text, VV, traditionalNames):
         text = ADD_NAME_FIELD_REGEX.sub('', text)
     text = ADD_NAME_REGEX.sub(r'\\\1add ', text)
     text = re.sub(r'\\(\+?)add \?', r'\\\1add ', text)
-    for char in PARALLELISM_CHARS:
-        text = text.replace(char, '')
-    return text
+    return remove_parallelism_markers(text)
 
 
 def esfm_to_usfm(text, VV, code, traditionalNames):
@@ -949,8 +967,7 @@ def clean_vpl_text(text, VV):
     text = re.sub(r'\|[^\\]*(?=\\\+?w\*)', '', text) # \w word|attributes\w*
     text = re.sub(r'\\\+?[a-z]+[0-9]*\*', '', text) # All remaining closing markers
     text = re.sub(r'\\\+?[a-z]+[0-9]* ?', '', text) # and opening markers
-    for char in PARALLELISM_CHARS:
-        text = text.replace(char, '')
+    # (Parallelism and reordering markers are already gone from the USFM)
     if VV == 'LV':
         text = text.replace('_', ' ')
     return re.sub(r'\s+', ' ', text).strip()
