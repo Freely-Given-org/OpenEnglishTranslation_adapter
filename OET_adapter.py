@@ -884,6 +884,8 @@ ADD_REMOVE_CHARS = '+=<>≡&@*#%^$≈' # \add fields starting with one of these 
 ADD_REMOVE_REGEX = re.compile(r'\\(\+?)add \??[' + re.escape(ADD_REMOVE_CHARS) + r']\??(.*?)\\\1add\*')
 ADD_NAME_REGEX = re.compile(r'\\(\+?)add !')
 ADD_NAME_FIELD_REGEX = re.compile(r' ?\\(\+?)add !.*?\\\1add\*')
+# Custom OET-RV Psalm structure (e.g., '\z1 ', '\zr ') and highlighting (e.g., '\z1hilite …\z1hilite*') markers
+CUSTOM_Z_MARKER_REGEX = re.compile(r'\\\+?z[a-z0-9]+(?:\*| )')
 # OET-RV Hebrew parallelism markers start the second (poetry) line of a parallel set:
 #   ≈ synonymous ('\q1 ≈…'), ^ contrasting ('\q1 ^but…'), → consequence ('\q1 →so…')
 #   They come after any paragraph and/or verse marker, e.g., '\q2 \v 4 ≈…' or '\v 12 ^…'
@@ -913,6 +915,7 @@ def simplify_markers(text, VV, traditionalNames):
         \\add ! (name explanation) fields become straight \\add fields, or are deleted if changing
             back to traditional names,
         straight \\add fields stay (with any ? removed),
+        custom \\z… (Psalm structure and highlighting) markers are removed,
         Hebrew parallelism (≈ ^ → at the start of a line) and reordering (⇔) markers are removed.
     """
     if VV == 'LV':
@@ -926,6 +929,7 @@ def simplify_markers(text, VV, traditionalNames):
         text = ADD_NAME_FIELD_REGEX.sub('', text)
     text = ADD_NAME_REGEX.sub(r'\\\1add ', text)
     text = re.sub(r'\\(\+?)add \?', r'\\\1add ', text)
+    text = CUSTOM_Z_MARKER_REGEX.sub('', text)
     return remove_parallelism_markers(text)
 
 
@@ -942,8 +946,6 @@ def esfm_to_usfm(text, VV, code, traditionalNames):
     text = simplify_markers(text, VV, traditionalNames)
     text = text.replace('\\untr ', '').replace('\\untr*', '')
     if VV == 'RV':
-        text = re.sub(r'\\z[a-z0-9]+\*', '', text) # Psalm/Song thematic colouring markers
-        text = re.sub(r'\\z[a-z0-9]+ ', '', text)
         text = text.replace("'", '’') # Convert apostrophes
         newLines = []
         for line in text.split('\n'):
